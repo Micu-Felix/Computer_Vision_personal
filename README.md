@@ -1,2 +1,2 @@
 # Computer_Vision
-Labs fro computer vision and deep learning
+Project for computer vision and deep learning
