@@ -1,2 +1,2 @@
-# Computer_Vision_personal
+# Computer_Vision
 Labs fro computer vision and deep learning
