@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
-
-import time
+import keras
+from keras.utils.vis_utils import pydot
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
@@ -9,13 +9,14 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.python.keras.layers.preprocessing.string_lookup import StringLookup
 
+keras.utils.vis_utils.pydot = pydot
 # download data from https://www.kaggle.com/fournierp/captcha-version-2-images
 # and make sure the images are in the folder named captcha_images
-# TODO comments to be added
 data_dir = Path("./captcha_images/")
 
 input_images = sorted(list(map(str, list(data_dir.glob("*.png")))))
 ground_truth_labels = [img.split(os.path.sep)[-1].split(".png")[0] for img in input_images]
+
 unique_characters = set(character for label in ground_truth_labels for character in label)
 
 img_width = 200
@@ -23,16 +24,41 @@ img_height = 50
 
 batch_size = 16
 
-downsample_factor = 4
-
 max_length = max([len(label) for label in ground_truth_labels])
 
+'''
+pentru ca vocabularul e lista de caractere unice, StringLookup o sa returneze o struct de date
+ce o sa contina pozitia in care apare litera in vocabularul original
+
+de exemplu pentru ["a", "b", "c", "d"] ca si vocabular 
+respectiv cu apelul [["a", "c", "d"], ["d", "z", "b"]] la stringlookup
+
+obtinem:
+
+array([[1, 3, 4],
+       [4, 0, 2]])
+
+
+iar cu invert 
+
+pentru inputul tf.constant([[1, 3, 4], [4, 0, 2]])
+
+obtinem
+
+[[b'a', b'c', b'd'],
+[b'd', b'[UNK]', b'b']]
+
+'''
+
+# inceput initializare functii mapare
 convert_char_to_number = StringLookup(vocabulary=list(unique_characters), mask_token=None)
 
 convert_number_to_char = StringLookup(
     vocabulary=convert_char_to_number.get_vocabulary(), mask_token=None, invert=True
 )
 
+
+# sfarsit initializare functii mapare
 
 def split_data(images, labels, train_size=0.9, shuffle=True):
     size = len(images)
@@ -53,12 +79,15 @@ def encode_sample(img_path, gt_label):
 
     img = tf.io.decode_png(img, channels=1)
 
+    # face sa aiba val intre 0 si 1
     img = tf.image.convert_image_dtype(img, tf.float32)
 
     img = tf.image.resize(img, [img_height, img_width])
 
     reshaped_img = tf.transpose(img, perm=[1, 0, 2])
 
+    # unicode split transforma un string in siruri binare de caract
+    # de ex "abc" devine b'a',b'b',b'c'
     encoded_gt_label = convert_char_to_number(tf.strings.unicode_split(gt_label, input_encoding="UTF-8"))
 
     return {"image": reshaped_img, "label": encoded_gt_label}
@@ -66,13 +95,14 @@ def encode_sample(img_path, gt_label):
 
 train = tf.data.Dataset.from_tensor_slices((x_train, y_train))
 train = (
-    train.map(encode_sample, num_parallel_calls=tf.data.AUTOTUNE).batch(batch_size).prefetch(
-        buffer_size=tf.data.AUTOTUNE)
+    train.map(encode_sample, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_size).prefetch(
+        buffer_size=tf.data.experimental.AUTOTUNE)
 )
 
 validation = tf.data.Dataset.from_tensor_slices((x_valid, y_valid))
-validation = (validation.map(encode_sample, num_parallel_calls=tf.data.AUTOTUNE).batch(batch_size).prefetch(
-    buffer_size=tf.data.AUTOTUNE)
+validation = (
+    validation.map(encode_sample, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_size).prefetch(
+        buffer_size=tf.data.experimental.AUTOTUNE)
 )
 
 _, ax = plt.subplots(4, 4, figsize=(10, 5))
@@ -108,7 +138,6 @@ class MyDenseLayer(layers.Dense):
         output = super().call(inputs)
         self.add_metric(self.mean(inputs))
         self.add_metric(tf.reduce_sum(inputs), name='metric_sum')
-        # TODO other usefull metrics to be found
 
         return output
 
@@ -185,18 +214,22 @@ def build_model():
         inputs=[input_img, labels], outputs=output, name="ocr_model_v1"
     )
 
-    optimizer = keras.optimizers.Adam()
+    optimizer = keras.optimizers.Nadam()
+    # optimizer = keras.optimizers.Adadelta()
 
     built_model.compile(optimizer=optimizer)
     return built_model
 
 
+used_optimizer = "Nadam"
+
 model = build_model()
+# plot_model(model, to_file='model_arch.png', show_shapes=True, show_layer_names=True)
 model.summary()
 # time.sleep(100000)
 
-# TODO better epoch number to be found
-epochs = 100
+
+epochs = 50
 stop_margin = 10
 
 early_stopping = keras.callbacks.EarlyStopping(
@@ -214,75 +247,75 @@ prediction_model = keras.models.Model(
     model.get_layer(name="image").input, model.get_layer(name="dense2").output
 )
 prediction_model.summary()
-prediction_model.save('first_working_model')
+prediction_model.save('best_model')
+
+# def decode_batch_predictions(prediction):
+#     input_len = np.ones(prediction.shape[0]) * prediction.shape[1]
+
+#     results = keras.backend.ctc_decode(prediction, input_length=input_len, greedy=True)[0][0][
+#               :, :max_length
+#               ]
+
+#     predicted_text = []
+#     for result in results:
+#         result = tf.strings.reduce_join(convert_number_to_char(result)).numpy().decode("utf-8")
+#         predicted_text.append(result)
+#     return predicted_text
 
 
-def decode_batch_predictions(prediction):
-    input_len = np.ones(prediction.shape[0]) * prediction.shape[1]
+# for batch in validation.take(1):
+#     batch_images = batch["image"]
+#     batch_labels = batch["label"]
 
-    results = keras.backend.ctc_decode(prediction, input_length=input_len, greedy=True)[0][0][
-              :, :max_length
-              ]
+#     predictions = prediction_model.predict(batch_images)
+#     prediction_text = decode_batch_predictions(predictions)
 
-    predicted_text = []
-    for result in results:
-        result = tf.strings.reduce_join(convert_number_to_char(result)).numpy().decode("utf-8")
-        predicted_text.append(result)
-    return predicted_text
+#     original_text = []
+#     for label in batch_labels:
+#         label = tf.strings.reduce_join(convert_number_to_char(label)).numpy().decode("utf-8")
+#         original_text.append(label)
 
+#     fig, ax = plt.subplots(4, 4, figsize=(15, 5))
+#     fig.suptitle('Number epochs performed: '+str(epochs)+'\n with optimizer: '+used_optimizer)
+#     for i in range(len(prediction_text)):
+#         img = (batch_images[i, :, :, 0] * 255).numpy().astype(np.uint8)
+#         img = img.T
+#         title = f"Prediction: {prediction_text[i]}"
+#         ax[i // 4, i % 4].imshow(img, cmap="gray")
+#         ax[i // 4, i % 4].set_title(title)
+#         ax[i // 4, i % 4].axis("off")
+# plt.show()
 
-for batch in validation.take(1):
-    batch_images = batch["image"]
-    batch_labels = batch["label"]
+# # """
+# # plotting metrices
+# # """
+# # N = np.arange(0, len(history.history["loss"]))
+# # plt.style.use("ggplot")
+# # plt.figure()
+# # plt.plot(N, history.history["loss"], label="train_loss")
+# # plt.plot(N, history.history["val_loss"], label="val_loss")
+# # plt.title("Training Loss and Accuracy")
+# # plt.xlabel("Epoch #")
+# # plt.ylabel("Loss")
+# # plt.legend(loc="lower left")
+# # plt.show()
 
-    predictions = prediction_model.predict(batch_images)
-    prediction_text = decode_batch_predictions(predictions)
+# # plt.style.use("ggplot")
+# # plt.figure()
+# # plt.plot(N, history.history["metric_mean"], label="train_metric_mean")
+# # plt.plot(N, history.history["val_metric_mean"], label="val_metric_mean")
+# # plt.title("Mean Metric")
+# # plt.xlabel("Epochs")
+# # plt.ylabel("Mean")
+# # plt.legend(loc="lower left")
+# # plt.show()
 
-    original_text = []
-    for label in batch_labels:
-        label = tf.strings.reduce_join(convert_number_to_char(label)).numpy().decode("utf-8")
-        original_text.append(label)
-
-    _, ax = plt.subplots(4, 4, figsize=(15, 5))
-    for i in range(len(prediction_text)):
-        img = (batch_images[i, :, :, 0] * 255).numpy().astype(np.uint8)
-        img = img.T
-        title = f"Prediction: {prediction_text[i]}"
-        ax[i // 4, i % 4].imshow(img, cmap="gray")
-        ax[i // 4, i % 4].set_title(title)
-        ax[i // 4, i % 4].axis("off")
-plt.show()
-
-"""
-plotting metrices
-"""
-N = np.arange(0, len(history.history["loss"]))
-plt.style.use("ggplot")
-plt.figure()
-plt.plot(N, history.history["loss"], label="train_loss")
-plt.plot(N, history.history["val_loss"], label="val_loss")
-plt.title("Training Loss and Accuracy")
-plt.xlabel("Epoch #")
-plt.ylabel("Loss")
-plt.legend(loc="lower left")
-plt.show()
-
-plt.style.use("ggplot")
-plt.figure()
-plt.plot(N, history.history["metric_mean"], label="train_metric_mean")
-plt.plot(N, history.history["val_metric_mean"], label="val_metric_mean")
-plt.title("Mean Metric")
-plt.xlabel("Epochs")
-plt.ylabel("Mean")
-plt.legend(loc="lower left")
-plt.show()
-
-plt.style.use("ggplot")
-plt.figure()
-plt.plot(N, history.history["metric_sum"], label="train_metric_sum")
-plt.plot(N, history.history["val_metric_sum"], label="val_metric_sum")
-plt.title("Sumation Metric")
-plt.xlabel("Epochs")
-plt.ylabel("Sum")
-plt.legend(loc="lower left")
-plt.show()
+# # plt.style.use("ggplot")
+# # plt.figure()
+# # plt.plot(N, history.history["metric_sum"], label="train_metric_sum")
+# # plt.plot(N, history.history["val_metric_sum"], label="val_metric_sum")
+# # plt.title("Sumation Metric")
+# # plt.xlabel("Epochs")
+# # plt.ylabel("Sum")
+# # plt.legend(loc="lower left")
+# # plt.show()
